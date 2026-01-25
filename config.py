@@ -26,6 +26,9 @@ class Config:
     # Настройки дедупликации
     SIMILARITY_THRESHOLD = float(os.getenv('SIMILARITY_THRESHOLD', '0.85'))
     
+    # Настройки релевантности
+    RELEVANCE_THRESHOLD = float(os.getenv('RELEVANCE_THRESHOLD', '0.6'))
+    
     # Flask настройки
     FLASK_SECRET_KEY = os.getenv('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
     FLASK_DEBUG = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'

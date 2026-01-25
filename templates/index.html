@@ -47,16 +47,13 @@
                         <form id="processingForm">
                             <div class="mb-3">
                                 <label for="rss_feeds" class="form-label">RSS каналы (по одному на строку)</label>
-                                <textarea class="form-control" id="rss_feeds" rows="8" 
+                                <textarea class="form-control" id="rss_feeds" rows="5" 
                                     placeholder="https://example.com/feed1.xml&#10;https://example.com/feed2.xml" required>{{ settings.rss_feeds|safe }}</textarea>
-                                <small class="form-text text-muted">Введите URL RSS каналов, каждый с новой строки. Значения по умолчанию из .env</small>
                             </div>
                             <div class="mb-3">
                                 <label for="criteria" class="form-label">Критерий отбора новостей</label>
-                                <input type="text" class="form-control" id="criteria" 
-                                    value="{{ settings.selection_criteria }}"
-                                    placeholder="новости о технологиях и искусственном интеллекте" required>
-                                <small class="form-text text-muted">Опишите критерий релевантности новостей. Значение по умолчанию из .env</small>
+                                <textarea class="form-control" id="criteria" rows="3" 
+                                    placeholder="новости о технологиях и искусственном интеллекте" required>{{ settings.selection_criteria }}</textarea>
                             </div>
                             
                             <hr>
@@ -77,11 +74,19 @@
                                 </div>
                             </div>
                             
-                            <div class="mb-3">
-                                <label for="similarity_threshold" class="form-label">Порог схожести для дедупликации</label>
-                                <input type="number" class="form-control" id="similarity_threshold" 
-                                    value="{{ settings.similarity_threshold }}" step="0.01" min="0" max="1">
-                                <small class="form-text text-muted">Порог для определения дубликатов (0.0-1.0)</small>
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label for="similarity_threshold" class="form-label">Порог схожести для дедупликации</label>
+                                    <input type="number" class="form-control" id="similarity_threshold" 
+                                        value="{{ settings.similarity_threshold }}" step="0.01" min="0" max="1">
+                                    <small class="form-text text-muted">Порог для определения дубликатов (0.0-1.0)</small>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="relevance_threshold" class="form-label">Порог релевантности</label>
+                                    <input type="number" class="form-control" id="relevance_threshold" 
+                                        value="{{ settings.relevance_threshold }}" step="0.01" min="0" max="1">
+                                    <small class="form-text text-muted">Порог для определения релевантности (0.0-1.0)</small>
+                                </div>
                             </div>
                             
                             <button type="submit" class="btn btn-primary w-100 mb-2" id="startBtn">
@@ -107,35 +112,6 @@
                         </div>
                         <div id="stepsContainer" style="display: none;">
                             <!-- Шаги будут добавлены динамически -->
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="card">
-                    <div class="card-header bg-info text-white">
-                        <h5 class="mb-0"><i class="bi bi-sliders"></i> Текущие настройки системы</h5>
-                    </div>
-                    <div class="card-body">
-                        <div class="row">
-                            <div class="col-6">
-                                <small class="text-muted">Модель LLM:</small>
-                                <div class="fw-bold">{{ settings.llm_model }}</div>
-                            </div>
-                            <div class="col-6">
-                                <small class="text-muted">Temperature:</small>
-                                <div class="fw-bold">{{ settings.llm_temperature }}</div>
-                            </div>
-                        </div>
-                        <hr class="my-2">
-                        <div class="row">
-                            <div class="col-6">
-                                <small class="text-muted">Порог схожести:</small>
-                                <div class="fw-bold">{{ settings.similarity_threshold }}</div>
-                            </div>
-                            <div class="col-6">
-                                <small class="text-muted">API Endpoint:</small>
-                                <div class="fw-bold small">{{ settings.openai_api_base }}</div>
-                            </div>
                         </div>
                     </div>
                 </div>
@@ -190,6 +166,35 @@
 
         <div class="row mt-4">
             <div class="col-12">
+                <div class="card mb-3">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0"><i class="bi bi-search-heart"></i> Семантический поиск</h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="semanticSearchForm" onsubmit="performSemanticSearch(event)">
+                            <div class="row g-2">
+                                <div class="col-md-8">
+                                    <input type="text" class="form-control" id="semanticSearchQuery" 
+                                        placeholder="Введите запрос для семантического поиска по статьям..." required>
+                                </div>
+                                <div class="col-md-2">
+                                    <input type="number" class="form-control" id="semanticSearchThreshold" 
+                                        value="0.7" step="0.1" min="0" max="1" 
+                                        title="Порог схожести (0.0-1.0)">
+                                </div>
+                                <div class="col-md-2">
+                                    <button type="submit" class="btn btn-primary w-100" id="semanticSearchBtn">
+                                        <i class="bi bi-search"></i> Найти
+                                    </button>
+                                </div>
+                            </div>
+                            <small class="text-muted mt-2 d-block">
+                                <i class="bi bi-info-circle"></i> Семантический поиск находит статьи по смыслу, а не только по ключевым словам. Порог схожести: 0.0 (низкий) - 1.0 (высокий).
+                            </small>
+                        </form>
+                    </div>
+                </div>
+                
                 <div class="card">
                     <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
                         <h5 class="mb-0"><i class="bi bi-list-ul"></i> Результаты поисков (данные из БД)</h5>
@@ -212,7 +217,7 @@
                                 <tbody id="newsTableBody">
                                     <tr>
                                         <td colspan="5" class="text-center text-muted py-4">
-                                            <i class="bi bi-hourglass-split"></i> Загрузка новостей...
+                                            <i class="bi bi-inbox"></i> Запустите поиск для отображения результатов
                                         </td>
                                     </tr>
                                 </tbody>
@@ -318,6 +323,40 @@
                                             </div>
                                         </div>
                                     </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Семантический поиск для истории -->
+                <div class="row mb-3" id="historySemanticSearchRow" style="display: none;">
+                    <div class="col-12">
+                        <div class="card mb-3">
+                            <div class="card-header bg-primary text-white">
+                                <h5 class="mb-0"><i class="bi bi-search-heart"></i> Семантический поиск</h5>
+                            </div>
+                            <div class="card-body">
+                                <form id="historySemanticSearchForm" onsubmit="performHistorySemanticSearch(event)">
+                                    <div class="row g-2">
+                                        <div class="col-md-8">
+                                            <input type="text" class="form-control" id="historySemanticSearchQuery" 
+                                                placeholder="Введите запрос для семантического поиска по статьям выбранного запроса..." required>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <input type="number" class="form-control" id="historySemanticSearchThreshold" 
+                                                value="0.7" step="0.1" min="0" max="1" 
+                                                title="Порог схожести (0.0-1.0)">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <button type="submit" class="btn btn-primary w-100" id="historySemanticSearchBtn">
+                                                <i class="bi bi-search"></i> Найти
+                                            </button>
+                                        </div>
+                                    </div>
+                                    <small class="text-muted mt-2 d-block">
+                                        <i class="bi bi-info-circle"></i> Семантический поиск находит статьи по смыслу, а не только по ключевым словам. Порог схожести: 0.0 (низкий) - 1.0 (высокий).
+                                    </small>
                                 </form>
                             </div>
                         </div>

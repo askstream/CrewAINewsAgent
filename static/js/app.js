@@ -32,6 +32,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const llmModel = document.getElementById('llm_model').value.trim();
             const llmTemperature = parseFloat(document.getElementById('llm_temperature').value);
             const similarityThreshold = parseFloat(document.getElementById('similarity_threshold').value);
+            const relevanceThreshold = parseFloat(document.getElementById('relevance_threshold').value);
 
             if (!rssFeeds.trim() || !criteria.trim()) {
                 alert('Заполните обязательные поля: RSS каналы и критерий отбора');
@@ -49,6 +50,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 return;
             }
 
+            if (isNaN(relevanceThreshold) || relevanceThreshold < 0 || relevanceThreshold > 1) {
+                alert('Порог релевантности должен быть числом от 0.0 до 1.0');
+                return;
+            }
+
             startBtn.disabled = true;
             startBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Поиск...';
 
@@ -63,7 +69,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         criteria: criteria,
                         llm_model: llmModel,
                         llm_temperature: llmTemperature,
-                        similarity_threshold: similarityThreshold
+                        similarity_threshold: similarityThreshold,
+                        relevance_threshold: relevanceThreshold
                     })
                 });
 
@@ -78,6 +85,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     startStatusPolling();
                     // Скрываем кнопку удаления до завершения поиска
                     document.getElementById('deleteCurrentSearchBtn').style.display = 'none';
+                    // Очищаем таблицу новостей (покажет пустое состояние до завершения поиска)
+                    const tbody = document.getElementById('newsTableBody');
+                    if (tbody) {
+                        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><i class="bi bi-hourglass-split"></i> Ожидание результатов поиска...</td></tr>';
+                    }
                 } else {
                     showError(data.error || 'Ошибка при запуске обработки');
                 }
@@ -95,7 +107,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const steps = [
             'Сбор новостей из RSS каналов',
             'Дедупликация статей',
-            'Классификация по релевантности'
+            'Классификация по релевантности',
+            'Генерация саммари статей',
+            'Генерация векторных представлений'
         ];
 
         steps.forEach((stepName, index) => {
@@ -148,8 +162,9 @@ document.addEventListener('DOMContentLoaded', function() {
                             currentSearchHistoryId = status.search_history_id;
                             document.getElementById('deleteCurrentSearchBtn').style.display = 'block';
                         }
-                        // Обновляем новости для текущего запроса
+                        // Обновляем новости и статистику для текущего запроса
                         loadNews();
+                        loadGeneralStatistics();
                     } else {
                         showError(status.error_message || 'Произошла ошибка при обработке');
                     }
@@ -161,12 +176,59 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function updateProgress(status) {
+        // Если шагов больше, чем создано, создаем недостающие
+        if (status.steps && status.steps.length > 0) {
+            const existingSteps = document.querySelectorAll('.step-card').length;
+            if (status.steps.length > existingSteps) {
+                // Создаем недостающие шаги
+                const stepNames = [
+                    'Сбор новостей из RSS каналов',
+                    'Дедупликация статей',
+                    'Классификация по релевантности',
+                    'Генерация саммари статей',
+                    'Генерация векторных представлений'
+                ];
+                
+                for (let i = existingSteps; i < status.steps.length; i++) {
+                    const stepCard = document.createElement('div');
+                    stepCard.className = 'card step-card';
+                    stepCard.id = `step-${i}`;
+                    stepCard.innerHTML = `
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <h6 class="mb-0">
+                                    <i class="bi bi-circle" id="icon-${i}"></i> ${stepNames[i] || `Шаг ${i + 1}`}
+                                </h6>
+                                <span class="badge bg-secondary" id="status-${i}">Ожидание</span>
+                            </div>
+                            <div class="progress mb-2" style="height: 8px;">
+                                <div class="progress-bar" id="progress-${i}" role="progressbar" 
+                                    style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+                            </div>
+                            <small class="text-muted" id="message-${i}"></small>
+                        </div>
+                    `;
+                    stepsContainer.appendChild(stepCard);
+                }
+            }
+        }
+        
         status.steps.forEach((step, index) => {
             const stepCard = document.getElementById(`step-${index}`);
+            if (!stepCard) {
+                console.warn(`Шаг ${index} не найден в DOM`);
+                return;
+            }
+            
             const icon = document.getElementById(`icon-${index}`);
             const statusBadge = document.getElementById(`status-${index}`);
             const progressBar = document.getElementById(`progress-${index}`);
             const message = document.getElementById(`message-${index}`);
+
+            if (!icon || !statusBadge || !progressBar || !message) {
+                console.warn(`Элементы шага ${index} не найдены`);
+                return;
+            }
 
             // Обновление класса карточки
             stepCard.className = 'card step-card';
@@ -293,9 +355,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 stepsContainer.style.display = 'none';
                 statisticsRow.style.display = 'none';
                 currentTaskId = null;
+                currentSearchHistoryId = null; // Сброс ID истории поиска
                 if (statusInterval) {
                     clearInterval(statusInterval);
                 }
+                // Обновляем таблицу новостей (покажет пустое состояние)
+                loadNews();
             } else {
                 showError(data.error || 'Ошибка при очистке базы данных');
             }
@@ -322,6 +387,13 @@ document.addEventListener('DOMContentLoaded', function() {
     // Загрузка новостей (для текущего запроса или всех)
     async function loadNews() {
         const tbody = document.getElementById('newsTableBody');
+        
+        // Если нет активного поиска, показываем пустое состояние
+        if (!currentSearchHistoryId) {
+            tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><i class="bi bi-inbox"></i> Запустите поиск для отображения результатов</td></tr>';
+            return;
+        }
+        
         tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><span class="spinner-border spinner-border-sm"></span> Загрузка...</td></tr>';
 
         try {
@@ -393,12 +465,41 @@ document.addEventListener('DOMContentLoaded', function() {
                 </td>
                 <td class="align-middle">
                     <div>
-                        <span class="badge ${relevanceBadgeClass} relevance-badge">${relevanceText}</span>
+                        <span class="badge ${relevanceBadgeClass} relevance-badge" 
+                              ${article.classification_reason ? `data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(article.classification_reason)}"` : ''}>
+                            ${relevanceText}
+                        </span>
                         <small class="d-block text-muted mt-1">${relevanceScore}%</small>
                     </div>
                 </td>
             `;
             tbody.appendChild(row);
+            
+            // Инициализация tooltip для релевантности
+            if (article.classification_reason) {
+                const tooltipElement = row.querySelector('[data-bs-toggle="tooltip"]');
+                if (tooltipElement) {
+                    new bootstrap.Tooltip(tooltipElement);
+                }
+            }
+            
+            // Строка с саммари (если есть, показываем перед полным содержанием)
+            if (article.summary && article.summary.trim()) {
+                const summaryRow = document.createElement('tr');
+                summaryRow.className = 'news-article-group news-detail-row';
+                summaryRow.setAttribute('data-article-id', article.id);
+                if (article.is_relevant) {
+                    summaryRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                summaryRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <div class="alert alert-info mb-0 py-2">
+                            <small><strong><i class="bi bi-file-text"></i> Саммари:</strong> ${escapeHtml(article.summary)}</small>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(summaryRow);
+            }
 
             // Строка с содержанием (если есть)
             if (article.content && article.content.trim()) {
@@ -501,53 +602,47 @@ document.addEventListener('DOMContentLoaded', function() {
 
         let sourcesHtml = '';
         if (stats.sources && stats.sources.length > 0) {
-            sourcesHtml = '<div class="mt-3"><h6>Статистика по источникам:</h6><ul class="list-group">';
+            sourcesHtml = '<div class="mt-2"><small class="text-muted fw-bold">Источники:</small><div class="d-flex flex-wrap gap-1 mt-1">';
             stats.sources.forEach(source => {
-                sourcesHtml += `<li class="list-group-item d-flex justify-content-between align-items-center">
-                    ${escapeHtml(source.name)}
-                    <span class="badge bg-primary rounded-pill">${source.count}</span>
-                </li>`;
+                sourcesHtml += `<span class="badge bg-primary">${escapeHtml(source.name)}: ${source.count}</span>`;
             });
-            sourcesHtml += '</ul></div>';
+            sourcesHtml += '</div></div>';
         }
 
         let searchesHtml = '';
         if (stats.last_searches && stats.last_searches.length > 0) {
-            searchesHtml = '<div class="mt-3"><h6>Последние поиски:</h6><ul class="list-group">';
+            searchesHtml = '<div class="mt-2"><small class="text-muted fw-bold">Последние поиски:</small><div class="d-flex flex-wrap gap-1 mt-1">';
             stats.last_searches.forEach(search => {
-                const date = search.date ? new Date(search.date).toLocaleString('ru-RU') : 'Не указана';
-                searchesHtml += `<li class="list-group-item d-flex justify-content-between align-items-center">
-                    ${date}
-                    <span class="badge bg-info rounded-pill">${search.count} статей</span>
-                </li>`;
+                const date = search.date ? new Date(search.date).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+                searchesHtml += `<span class="badge bg-info">${date}: ${search.count}</span>`;
             });
-            searchesHtml += '</ul></div>';
+            searchesHtml += '</div></div>';
         }
 
         content.innerHTML = `
-            <div class="row">
-                <div class="col-md-3">
-                    <div class="text-center p-3 bg-light rounded">
-                        <h3 class="text-primary">${stats.total || 0}</h3>
-                        <p class="mb-0 text-muted">Всего статей</p>
+            <div class="row g-2">
+                <div class="col-md-3 col-6">
+                    <div class="text-center p-2 bg-light rounded">
+                        <h5 class="text-primary mb-1">${stats.total || 0}</h5>
+                        <small class="text-muted">Всего статей</small>
                     </div>
                 </div>
-                <div class="col-md-3">
-                    <div class="text-center p-3 bg-light rounded">
-                        <h3 class="text-success">${stats.relevant || 0}</h3>
-                        <p class="mb-0 text-muted">Релевантных</p>
+                <div class="col-md-3 col-6">
+                    <div class="text-center p-2 bg-light rounded">
+                        <h5 class="text-success mb-1">${stats.relevant || 0}</h5>
+                        <small class="text-muted">Релевантных</small>
                     </div>
                 </div>
-                <div class="col-md-3">
-                    <div class="text-center p-3 bg-light rounded">
-                        <h3 class="text-warning">${stats.duplicates || 0}</h3>
-                        <p class="mb-0 text-muted">Дубликатов</p>
+                <div class="col-md-3 col-6">
+                    <div class="text-center p-2 bg-light rounded">
+                        <h5 class="text-warning mb-1">${stats.duplicates || 0}</h5>
+                        <small class="text-muted">Дубликатов</small>
                     </div>
                 </div>
-                <div class="col-md-3">
-                    <div class="text-center p-3 bg-light rounded">
-                        <h3 class="text-info">${stats.unique_non_relevant || 0}</h3>
-                        <p class="mb-0 text-muted">Уникальных нерелевантных</p>
+                <div class="col-md-3 col-6">
+                    <div class="text-center p-2 bg-light rounded">
+                        <h5 class="text-info mb-1">${stats.unique_non_relevant || 0}</h5>
+                        <small class="text-muted">Нерелевантных</small>
                     </div>
                 </div>
             </div>
@@ -633,15 +728,27 @@ document.addEventListener('DOMContentLoaded', function() {
                     // Скрываем форму, если нет записей на этой странице
                     if (data.history.length === 0) {
                         document.getElementById('historyDetailsRow').style.display = 'none';
+                        const historySemanticSearchRow = document.getElementById('historySemanticSearchRow');
+                        if (historySemanticSearchRow) {
+                            historySemanticSearchRow.style.display = 'none';
+                        }
                     }
                 }
             } else {
                 container.innerHTML = '<div class="text-center text-danger py-4">Ошибка при загрузке истории</div>';
                 document.getElementById('historyDetailsRow').style.display = 'none';
+                const historySemanticSearchRow = document.getElementById('historySemanticSearchRow');
+                if (historySemanticSearchRow) {
+                    historySemanticSearchRow.style.display = 'none';
+                }
             }
         } catch (error) {
             container.innerHTML = '<div class="text-center text-danger py-4">Ошибка: ' + error.message + '</div>';
             document.getElementById('historyDetailsRow').style.display = 'none';
+            const historySemanticSearchRow = document.getElementById('historySemanticSearchRow');
+            if (historySemanticSearchRow) {
+                historySemanticSearchRow.style.display = 'none';
+            }
         }
     }
 
@@ -715,7 +822,17 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // Выбор записи истории и загрузка статей
+    // Переменная для хранения выбранного historyId на вкладке истории
+    let selectedHistoryId = null;
+    
     async function selectHistoryRecord(historyId, eventElement = null) {
+        selectedHistoryId = historyId;
+        
+        // Показываем блок семантического поиска
+        const historySemanticSearchRow = document.getElementById('historySemanticSearchRow');
+        if (historySemanticSearchRow) {
+            historySemanticSearchRow.style.display = 'block';
+        }
         // Выделение выбранной строки
         document.querySelectorAll('.history-row').forEach(row => {
             row.classList.remove('table-active');
@@ -853,13 +970,24 @@ document.addEventListener('DOMContentLoaded', function() {
                 </td>
                 <td class="align-middle">
                     <div>
-                        <span class="badge ${relevanceBadgeClass} relevance-badge">${relevanceText}</span>
+                        <span class="badge ${relevanceBadgeClass} relevance-badge" 
+                              ${article.classification_reason ? `data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(article.classification_reason)}"` : ''}>
+                            ${relevanceText}
+                        </span>
                         <small class="d-block text-muted mt-1">${relevanceScore}%</small>
                     </div>
                 </td>
             `;
             tbody.appendChild(row);
-
+            
+            // Инициализация tooltip для релевантности
+            if (article.classification_reason) {
+                const tooltipElement = row.querySelector('[data-bs-toggle="tooltip"]');
+                if (tooltipElement) {
+                    new bootstrap.Tooltip(tooltipElement);
+                }
+            }
+            
             // Строка с содержанием (если есть)
             if (article.content && article.content.trim()) {
                 const contentRow = document.createElement('tr');
@@ -933,11 +1061,16 @@ document.addEventListener('DOMContentLoaded', function() {
             if (response.ok && data.success) {
                 // Если удаленная запись была выбрана, скрываем форму деталей
                 const detailsRow = document.getElementById('historyDetailsRow');
+                const historySemanticSearchRow = document.getElementById('historySemanticSearchRow');
                 const selectedRow = document.querySelector('.history-row.table-active');
                 if (selectedRow && selectedRow.getAttribute('data-history-id') == historyId) {
                     detailsRow.style.display = 'none';
+                    if (historySemanticSearchRow) {
+                        historySemanticSearchRow.style.display = 'none';
+                    }
                     // Очищаем таблицу статей
                     document.getElementById('historyArticlesTableBody').innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4">Выберите запрос из истории</td></tr>';
+                    selectedHistoryId = null;
                 }
 
                 // Перезагружаем историю
@@ -1010,6 +1143,217 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
 
+    // Семантический поиск
+    async function performSemanticSearch(event) {
+        if (event) {
+            event.preventDefault();
+        }
+        
+        const query = document.getElementById('semanticSearchQuery').value.trim();
+        const threshold = parseFloat(document.getElementById('semanticSearchThreshold').value);
+        const searchBtn = document.getElementById('semanticSearchBtn');
+        
+        if (!query) {
+            alert('Введите поисковый запрос');
+            return;
+        }
+        
+        if (isNaN(threshold) || threshold < 0 || threshold > 1) {
+            alert('Порог схожести должен быть от 0.0 до 1.0');
+            return;
+        }
+        
+        searchBtn.disabled = true;
+        searchBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Поиск...';
+        
+        const tbody = document.getElementById('newsTableBody');
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><span class="spinner-border spinner-border-sm"></span> Поиск...</td></tr>';
+        
+        try {
+            const requestData = {
+                query: query,
+                threshold: threshold,
+                limit: 50
+            };
+            
+            // Добавляем search_history_id, если есть активный запрос
+            if (currentSearchHistoryId) {
+                requestData.search_history_id = currentSearchHistoryId;
+            }
+            
+            const response = await fetch('/api/semantic-search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestData)
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok && data.articles) {
+                if (data.articles.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-4">
+                        <i class="bi bi-search"></i> По запросу "${escapeHtml(query)}" ничего не найдено (порог: ${threshold})
+                    </td></tr>`;
+                } else {
+                    // Добавляем информацию о семантическом поиске
+                    const infoRow = document.createElement('tr');
+                    infoRow.className = 'table-info';
+                    infoRow.innerHTML = `
+                        <td colspan="5" class="text-center py-2">
+                            <small class="text-info">
+                                <i class="bi bi-info-circle"></i> Найдено ${data.found} статей по запросу: "${escapeHtml(query)}" (порог схожести: ${threshold})
+                            </small>
+                        </td>
+                    `;
+                    tbody.innerHTML = '';
+                    tbody.appendChild(infoRow);
+                    
+                    // Отображаем результаты с учетом similarity_score
+                    displaySemanticSearchResults(data.articles);
+                }
+            } else {
+                tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">Ошибка: ${data.error || 'Неизвестная ошибка'}</td></tr>`;
+            }
+        } catch (error) {
+            tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">Ошибка: ${error.message}</td></tr>`;
+        } finally {
+            searchBtn.disabled = false;
+            searchBtn.innerHTML = '<i class="bi bi-search"></i> Найти';
+        }
+    }
+    
+    function displaySemanticSearchResults(articles) {
+        const tbody = document.getElementById('newsTableBody');
+        
+        articles.forEach(article => {
+            // Основная строка
+            const row = document.createElement('tr');
+            row.className = 'news-article-group news-main-row';
+            if (article.is_relevant) {
+                row.classList.add('news-relevant', 'news-row-relevant');
+            }
+
+            // Форматирование даты
+            let dateStr = 'Не указана';
+            if (article.published_at) {
+                const date = new Date(article.published_at);
+                dateStr = date.toLocaleDateString('ru-RU', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+            }
+
+            // Форматирование релевантности
+            const relevanceScore = article.relevance_score !== null ? (article.relevance_score * 100).toFixed(0) : '—';
+            const relevanceBadgeClass = article.is_relevant ? 'bg-success' : 'bg-secondary';
+            const relevanceText = article.is_relevant ? 'Релевантно' : 'Не релевантно';
+            
+            // Схожесть по семантическому поиску
+            const similarityScore = article.similarity_score !== null && article.similarity_score !== undefined 
+                ? (article.similarity_score * 100).toFixed(0) 
+                : '—';
+
+            row.innerHTML = `
+                <td class="align-middle">
+                    <small class="text-muted">${article.id}</small>
+                </td>
+                <td class="align-middle">
+                    <small class="news-meta">${escapeHtml(article.source)}</small>
+                </td>
+                <td class="align-middle">
+                    <small class="news-meta">${dateStr}</small>
+                </td>
+                <td class="align-middle">
+                    <div class="news-title">${escapeHtml(article.title)}</div>
+                </td>
+                <td class="align-middle">
+                    <div>
+                        <span class="badge ${relevanceBadgeClass} relevance-badge" 
+                              ${article.classification_reason ? `data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(article.classification_reason)}"` : ''}>
+                            ${relevanceText}
+                        </span>
+                        <small class="d-block text-muted mt-1">Релевантность: ${relevanceScore}%</small>
+                        <small class="d-block text-info mt-1"><strong>Схожесть: ${similarityScore}%</strong></small>
+                    </div>
+                </td>
+            `;
+            tbody.appendChild(row);
+            
+            // Инициализация tooltip для релевантности
+            if (article.classification_reason) {
+                const tooltipElement = row.querySelector('[data-bs-toggle="tooltip"]');
+                if (tooltipElement) {
+                    new bootstrap.Tooltip(tooltipElement);
+                }
+            }
+
+            // Строка с саммари (если есть)
+            if (article.summary && article.summary.trim()) {
+                const summaryRow = document.createElement('tr');
+                summaryRow.className = 'news-article-group news-detail-row';
+                summaryRow.setAttribute('data-article-id', article.id);
+                if (article.is_relevant) {
+                    summaryRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                summaryRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <div class="alert alert-info mb-0 py-2">
+                            <small><strong><i class="bi bi-file-text"></i> Саммари:</strong> ${escapeHtml(article.summary)}</small>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(summaryRow);
+            }
+
+            // Строка с содержанием (если есть)
+            if (article.content && article.content.trim()) {
+                const contentRow = document.createElement('tr');
+                contentRow.className = 'news-article-group news-detail-row';
+                contentRow.setAttribute('data-article-id', article.id);
+                if (article.is_relevant) {
+                    contentRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                const sanitizedContent = DOMPurify.sanitize(article.content, {
+                    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'code', 'pre', 'div', 'span'],
+                    ALLOWED_ATTR: ['href', 'target', 'rel', 'class']
+                });
+                contentRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <div class="news-content-full news-content-collapsed" id="content-${article.id}">${sanitizedContent}</div>
+                        <div class="mt-2">
+                            <span class="news-expand-btn text-primary" onclick="toggleArticleContent(${article.id}, this)">
+                                <i class="bi bi-chevron-down" id="icon-${article.id}"></i> <span id="text-${article.id}">Развернуть</span>
+                            </span>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(contentRow);
+            }
+
+            // Строка с причиной классификации (если есть)
+            if (article.classification_reason && article.classification_reason.trim()) {
+                const reasonRow = document.createElement('tr');
+                reasonRow.className = 'news-article-group news-detail-row';
+                if (article.is_relevant) {
+                    reasonRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                reasonRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <small class="text-muted">
+                            <i class="bi bi-info-circle"></i> <strong>Причина:</strong> ${escapeHtml(article.classification_reason)}
+                        </small>
+                    </td>
+                `;
+                tbody.appendChild(reasonRow);
+            }
+        });
+    }
+
     // Делаем функции доступными глобально
     window.deleteCurrentSearch = deleteCurrentSearch;
     window.loadSearchHistory = loadSearchHistory;
@@ -1020,6 +1364,214 @@ document.addEventListener('DOMContentLoaded', function() {
     window.loadGeneralStatistics = loadGeneralStatistics;
     window.loadStatisticsFromApi = loadStatisticsFromApi;
     window.escapeHtml = escapeHtml;
+    window.performSemanticSearch = performSemanticSearch;
+    
+    // Семантический поиск для истории запросов
+    async function performHistorySemanticSearch(event) {
+        if (event) {
+            event.preventDefault();
+        }
+        
+        if (!selectedHistoryId) {
+            alert('Выберите запрос из истории для поиска');
+            return;
+        }
+        
+        const query = document.getElementById('historySemanticSearchQuery').value.trim();
+        const threshold = parseFloat(document.getElementById('historySemanticSearchThreshold').value);
+        const searchBtn = document.getElementById('historySemanticSearchBtn');
+        
+        if (!query) {
+            alert('Введите поисковый запрос');
+            return;
+        }
+        
+        if (isNaN(threshold) || threshold < 0 || threshold > 1) {
+            alert('Порог схожести должен быть от 0.0 до 1.0');
+            return;
+        }
+        
+        searchBtn.disabled = true;
+        searchBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Поиск...';
+        
+        const tbody = document.getElementById('historyArticlesTableBody');
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-4"><span class="spinner-border spinner-border-sm"></span> Поиск...</td></tr>';
+        
+        try {
+            const requestData = {
+                query: query,
+                threshold: threshold,
+                limit: 50,
+                search_history_id: selectedHistoryId
+            };
+            
+            const response = await fetch('/api/semantic-search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(requestData)
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok && data.articles) {
+                if (data.articles.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="5" class="text-center text-muted py-4">
+                        <i class="bi bi-search"></i> По запросу "${escapeHtml(query)}" ничего не найдено (порог: ${threshold})
+                    </td></tr>`;
+                } else {
+                    // Добавляем информацию о семантическом поиске
+                    const infoRow = document.createElement('tr');
+                    infoRow.className = 'table-info';
+                    infoRow.innerHTML = `
+                        <td colspan="5" class="text-center py-2">
+                            <small class="text-info">
+                                <i class="bi bi-info-circle"></i> Найдено ${data.found} статей по запросу: "${escapeHtml(query)}" (порог схожести: ${threshold})
+                            </small>
+                        </td>
+                    `;
+                    tbody.innerHTML = '';
+                    tbody.appendChild(infoRow);
+                    
+                    // Отображаем результаты с учетом similarity_score
+                    displayHistorySemanticSearchResults(data.articles);
+                }
+            } else {
+                tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">Ошибка: ${data.error || 'Неизвестная ошибка'}</td></tr>`;
+            }
+        } catch (error) {
+            tbody.innerHTML = `<tr><td colspan="5" class="text-center text-danger py-4">Ошибка: ${error.message}</td></tr>`;
+        } finally {
+            searchBtn.disabled = false;
+            searchBtn.innerHTML = '<i class="bi bi-search"></i> Найти';
+        }
+    }
+    
+    function displayHistorySemanticSearchResults(articles) {
+        const tbody = document.getElementById('historyArticlesTableBody');
+        
+        articles.forEach(article => {
+            // Основная строка
+            const row = document.createElement('tr');
+            row.className = 'news-article-group news-main-row';
+            if (article.is_relevant) {
+                row.classList.add('news-relevant', 'news-row-relevant');
+            }
+            
+            // Форматирование даты
+            let dateStr = 'Не указана';
+            if (article.published_at) {
+                const date = new Date(article.published_at);
+                dateStr = date.toLocaleDateString('ru-RU', {
+                    year: 'numeric',
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+            }
+            
+            // Форматирование релевантности
+            const relevanceScore = article.relevance_score !== null ? (article.relevance_score * 100).toFixed(0) : '—';
+            const relevanceBadgeClass = article.is_relevant ? 'bg-success' : 'bg-secondary';
+            const relevanceText = article.is_relevant ? 'Релевантно' : 'Не релевантно';
+            
+            // Оценка схожести из семантического поиска
+            const similarityScore = article.similarity_score !== null && article.similarity_score !== undefined
+                ? (article.similarity_score * 100).toFixed(0)
+                : '—';
+            
+            row.innerHTML = `
+                <td class="align-middle">
+                    <small class="text-muted">${article.id}</small>
+                </td>
+                <td class="align-middle">
+                    <small class="news-meta">${escapeHtml(article.source)}</small>
+                </td>
+                <td class="align-middle">
+                    <small class="news-meta">${dateStr}</small>
+                </td>
+                <td class="align-middle">
+                    <div class="news-title">${escapeHtml(article.title)}</div>
+                </td>
+                <td class="align-middle">
+                    <div>
+                        <span class="badge ${relevanceBadgeClass} relevance-badge" 
+                              ${article.classification_reason ? `data-bs-toggle="tooltip" data-bs-placement="top" title="${escapeHtml(article.classification_reason)}"` : ''}>
+                            ${relevanceText}
+                        </span>
+                        <small class="d-block text-muted mt-1">Релевантность: ${relevanceScore}%</small>
+                        <small class="d-block text-info mt-1"><strong>Схожесть: ${similarityScore}%</strong></small>
+                    </div>
+                </td>
+            `;
+            tbody.appendChild(row);
+            
+            // Инициализация tooltip для релевантности
+            if (article.classification_reason) {
+                const tooltipElement = row.querySelector('[data-bs-toggle="tooltip"]');
+                if (tooltipElement) {
+                    new bootstrap.Tooltip(tooltipElement);
+                }
+            }
+            
+            // Строка с саммари (если есть)
+            if (article.summary && article.summary.trim()) {
+                const summaryRow = document.createElement('tr');
+                summaryRow.className = 'news-article-group news-detail-row';
+                summaryRow.setAttribute('data-article-id', article.id);
+                if (article.is_relevant) {
+                    summaryRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                summaryRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <div class="alert alert-info mb-0 py-2">
+                            <small><strong><i class="bi bi-file-text"></i> Саммари:</strong> ${escapeHtml(article.summary)}</small>
+                        </div>
+                    </td>
+                `;
+                tbody.appendChild(summaryRow);
+            }
+            
+            // Строка с содержанием (если есть)
+            if (article.content && article.content.trim()) {
+                const contentRow = document.createElement('tr');
+                contentRow.className = 'news-article-group news-detail-row';
+                contentRow.setAttribute('data-article-id', article.id);
+                if (article.is_relevant) {
+                    contentRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                const sanitizedContent = DOMPurify.sanitize(article.content, {
+                    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'code', 'pre', 'div', 'span'],
+                    ALLOWED_ATTR: ['href', 'target', 'rel', 'class']
+                });
+                contentRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <div class="news-content">${sanitizedContent}</div>
+                    </td>
+                `;
+                tbody.appendChild(contentRow);
+            }
+            
+            // Строка с причиной классификации (если есть)
+            if (article.classification_reason && article.classification_reason.trim()) {
+                const reasonRow = document.createElement('tr');
+                reasonRow.className = 'news-article-group news-detail-row';
+                if (article.is_relevant) {
+                    reasonRow.classList.add('news-relevant', 'news-row-relevant');
+                }
+                reasonRow.innerHTML = `
+                    <td colspan="5" class="py-2 px-3">
+                        <small class="text-muted"><strong>Причина:</strong> ${escapeHtml(article.classification_reason)}</small>
+                    </td>
+                `;
+                tbody.appendChild(reasonRow);
+            }
+        });
+    }
+    
+    window.performHistorySemanticSearch = performHistorySemanticSearch;
 
     // Загрузка новостей и статистики при загрузке страницы
     loadNews();

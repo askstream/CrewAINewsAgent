@@ -44,11 +44,13 @@ class ProgressTracker:
         self.task_id = task_id
         self.status = 'pending'  # pending, running, completed, error
         self.current_step = 0
-        self.total_steps = 3
+        self.total_steps = 5
         self.steps = [
             {'name': 'Сбор новостей из RSS каналов', 'status': 'pending', 'progress': 0, 'message': ''},
             {'name': 'Дедупликация статей', 'status': 'pending', 'progress': 0, 'message': ''},
-            {'name': 'Классификация по релевантности', 'status': 'pending', 'progress': 0, 'message': ''}
+            {'name': 'Классификация по релевантности', 'status': 'pending', 'progress': 0, 'message': ''},
+            {'name': 'Генерация саммари статей', 'status': 'pending', 'progress': 0, 'message': ''},
+            {'name': 'Генерация векторных представлений', 'status': 'pending', 'progress': 0, 'message': ''}
         ]
         self.error_message = ''
         self.statistics = {}
@@ -76,7 +78,7 @@ class ProgressTracker:
         }
 
 
-def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm_temperature=None, similarity_threshold=None, openai_api_base=None):
+def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm_temperature=None, similarity_threshold=None, relevance_threshold=None, openai_api_base=None):
     """Обработка новостей с отслеживанием прогресса"""
     tracker = tasks_status[task_id]
     
@@ -86,6 +88,9 @@ def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm
     if llm_temperature is None:
         llm_temperature = Config.LLM_TEMPERATURE
     if similarity_threshold is None:
+        similarity_threshold = Config.SIMILARITY_THRESHOLD
+    if relevance_threshold is None:
+        relevance_threshold = Config.RELEVANCE_THRESHOLD
         similarity_threshold = Config.SIMILARITY_THRESHOLD
     if openai_api_base is None:
         openai_api_base = Config.OPENAI_API_BASE
@@ -116,7 +121,9 @@ def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm
                 llm_temperature=llm_temperature,
                 similarity_threshold=similarity_threshold,
                 openai_api_base=openai_api_base or '',
-                results_data={}
+                results_data={
+                    'relevance_threshold': relevance_threshold
+                }
             )
             session.add(search_history)
             session.commit()
@@ -201,6 +208,8 @@ def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm
                 NewsArticle.is_duplicate == False,
                 NewsArticle.relevance_score == None
             ).all()
+            # Получаем ID статей до закрытия сессии
+            unique_article_ids = [article.id for article in unique_articles]
         finally:
             session.close()
         
@@ -212,16 +221,56 @@ def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm
             return
         
         print(f"Критерий отбора: {criteria}")
-        print(f"Используемые настройки: модель={llm_model}, temperature={llm_temperature}, порог={similarity_threshold}")
+        print(f"Используемые настройки: модель={llm_model}, temperature={llm_temperature}, порог схожести={similarity_threshold}, порог релевантности={relevance_threshold}")
         tracker.update_step(2, 'running', 0, f'Классификация {len(unique_articles)} статей по критерию: {criteria[:50]}...')
         
         total = len(unique_articles)
         for i, article in enumerate(unique_articles):
-            classify_articles_with_settings([article], criteria, llm_model, llm_temperature)
+            classify_articles_with_settings([article], criteria, llm_model, llm_temperature, relevance_threshold)
             progress = int((i + 1) / total * 100)
             tracker.update_step(2, 'running', progress, f'Обработано {i + 1} из {total} статей')
         
         tracker.update_step(2, 'completed', 100, f'Классифицировано {total} статей')
+        
+        # Шаг 4: Генерация саммари для релевантных статей (опционально)
+        # Загружаем релевантные статьи заново из БД
+        session = get_db_session()
+        try:
+            relevant_articles = session.query(NewsArticle).filter(
+                NewsArticle.search_history_id == search_history_id,
+                NewsArticle.is_duplicate == False,
+                NewsArticle.is_relevant == True
+            ).all()
+        finally:
+            session.close()
+            
+        if relevant_articles:
+            try:
+                from agents.summarizer import generate_summaries_for_articles
+                tracker.update_step(3, 'running', 0, f'Генерация саммари для {len(relevant_articles)} релевантных статей...')
+                generate_summaries_for_articles(relevant_articles, llm_model, llm_temperature)
+                tracker.update_step(3, 'completed', 100, f'Саммари сгенерировано для {len(relevant_articles)} статей')
+            except Exception as e:
+                print(f"Ошибка при генерации саммари: {e}")
+                import traceback
+                traceback.print_exc()
+                tracker.update_step(3, 'error', 0, f'Ошибка при генерации саммари: {str(e)[:50]}')
+                # Продолжаем работу даже если саммари не удалось сгенерировать
+        else:
+            tracker.update_step(3, 'completed', 100, 'Нет релевантных статей для генерации саммари')
+        
+        # Шаг 5: Генерация embeddings для всех уникальных статей (опционально)
+        try:
+            from agents.embeddings import generate_embeddings_for_articles_by_ids
+            tracker.update_step(4, 'running', 0, f'Генерация векторных представлений для {len(unique_article_ids)} статей...')
+            generate_embeddings_for_articles_by_ids(unique_article_ids, search_history_id)
+            tracker.update_step(4, 'completed', 100, f'Векторные представления сгенерированы для {len(unique_articles)} статей')
+        except Exception as e:
+            print(f"Ошибка при генерации embeddings: {e}")
+            import traceback
+            traceback.print_exc()
+            tracker.update_step(4, 'error', 0, f'Ошибка при генерации embeddings: {str(e)[:50]}')
+            # Продолжаем работу даже если embeddings не удалось сгенерировать
         
         # Итоговая статистика для текущего запроса
         session = get_db_session()
@@ -281,6 +330,7 @@ def index():
         'llm_model': Config.LLM_MODEL,
         'llm_temperature': Config.LLM_TEMPERATURE,
         'similarity_threshold': Config.SIMILARITY_THRESHOLD,
+        'relevance_threshold': Config.RELEVANCE_THRESHOLD,
         'openai_api_base': Config.OPENAI_API_BASE if Config.OPENAI_API_BASE else 'По умолчанию (OpenAI)',
         'rss_feeds': '\n'.join(Config.RSS_FEEDS) if Config.RSS_FEEDS else '',
         'selection_criteria': Config.SELECTION_CRITERIA if Config.SELECTION_CRITERIA else ''
@@ -300,6 +350,7 @@ def start_processing():
     llm_model = data.get('llm_model', '').strip() or Config.LLM_MODEL
     llm_temperature = float(data.get('llm_temperature', Config.LLM_TEMPERATURE))
     similarity_threshold = float(data.get('similarity_threshold', Config.SIMILARITY_THRESHOLD))
+    relevance_threshold = float(data.get('relevance_threshold', Config.RELEVANCE_THRESHOLD))
     # API Endpoint берется из конфигурации, не из формы
     openai_api_base = Config.OPENAI_API_BASE or ''
     
@@ -316,13 +367,16 @@ def start_processing():
     if not (0 <= similarity_threshold <= 1):
         return jsonify({'error': 'Порог схожести должен быть от 0.0 до 1.0'}), 400
     
+    if not (0 <= relevance_threshold <= 1):
+        return jsonify({'error': 'Порог релевантности должен быть от 0.0 до 1.0'}), 400
+    
     # Создание задачи
     task_id = str(uuid.uuid4())
     tracker = ProgressTracker(task_id)
     tasks_status[task_id] = tracker
     
     # Запуск обработки в отдельном потоке с настройками
-    thread = Thread(target=process_news_with_progress, args=(task_id, feed_urls, criteria, llm_model, llm_temperature, similarity_threshold, openai_api_base))
+    thread = Thread(target=process_news_with_progress, args=(task_id, feed_urls, criteria, llm_model, llm_temperature, similarity_threshold, relevance_threshold, openai_api_base))
     thread.daemon = True
     thread.start()
     
@@ -365,18 +419,28 @@ def get_results():
             
             results = []
             for article in articles:
-                results.append({
-                    'id': article.id,
-                    'title': article.title,
-                    'content': article.content or '',
-                    'link': article.link,
-                    'source': article.source or 'Неизвестный источник',
-                    'published_at': article.published_at.isoformat() if article.published_at else None,
-                    'relevance_score': article.relevance_score,
-                    'is_relevant': article.is_relevant,
-                    'classification_reason': article.classification_reason or '',
-                    'search_history_id': article.search_history_id
-                })
+                try:
+                    # Безопасное получение summary и embedding (на случай, если колонки еще не добавлены в БД)
+                    summary = getattr(article, 'summary', None) or ''
+                    embedding = getattr(article, 'embedding', None)
+                    
+                    results.append({
+                        'id': article.id,
+                        'title': article.title,
+                        'content': article.content or '',
+                        'summary': summary,
+                        'link': article.link,
+                        'source': article.source or 'Неизвестный источник',
+                        'published_at': article.published_at.isoformat() if article.published_at else None,
+                        'relevance_score': article.relevance_score,
+                        'is_relevant': article.is_relevant,
+                        'classification_reason': article.classification_reason or '',
+                        'search_history_id': article.search_history_id
+                    })
+                except Exception as e:
+                    # Если возникла ошибка при доступе к полям, пропускаем эту статью
+                    print(f"Ошибка при обработке статьи {article.id}: {e}")
+                    continue
             
             return jsonify({'articles': results})
         except Exception as e:
@@ -457,17 +521,26 @@ def get_history_articles(history_id):
             
             results = []
             for article in articles:
-                results.append({
-                    'id': article.id,
-                    'title': article.title,
-                    'content': article.content or '',
-                    'link': article.link,
-                    'source': article.source or 'Неизвестный источник',
-                    'published_at': article.published_at.isoformat() if article.published_at else None,
-                    'relevance_score': article.relevance_score,
-                    'is_relevant': article.is_relevant,
-                    'classification_reason': article.classification_reason or ''
-                })
+                try:
+                    # Безопасное получение summary (на случай, если колонка еще не добавлена в БД)
+                    summary = getattr(article, 'summary', None) or ''
+                    
+                    results.append({
+                        'id': article.id,
+                        'title': article.title,
+                        'content': article.content or '',
+                        'summary': summary,
+                        'link': article.link,
+                        'source': article.source or 'Неизвестный источник',
+                        'published_at': article.published_at.isoformat() if article.published_at else None,
+                        'relevance_score': article.relevance_score,
+                        'is_relevant': article.is_relevant,
+                        'classification_reason': article.classification_reason or ''
+                    })
+                except Exception as e:
+                    # Если возникла ошибка при доступе к полям, пропускаем эту статью
+                    print(f"Ошибка при обработке статьи {article.id}: {e}")
+                    continue
             
             return jsonify({'articles': results})
         except Exception as e:
@@ -595,6 +668,45 @@ def get_statistics():
             'sources': [],
             'last_searches': []
         }), 500
+
+
+@app.route('/api/semantic-search', methods=['POST'])
+def semantic_search():
+    """Семантический поиск статей по текстовому запросу"""
+    try:
+        data = request.json
+        query = data.get('query', '').strip()
+        search_history_id = data.get('search_history_id')
+        if search_history_id is not None:
+            search_history_id = int(search_history_id)
+        threshold = float(data.get('threshold', 0.7))
+        limit = int(data.get('limit', 20))
+        
+        if not query:
+            return jsonify({'error': 'Не указан поисковый запрос'}), 400
+        
+        if not (0 <= threshold <= 1):
+            return jsonify({'error': 'Порог схожести должен быть от 0.0 до 1.0'}), 400
+        
+        from agents.embeddings import semantic_search
+        
+        results = semantic_search(query, search_history_id, threshold, limit)
+        
+        articles_data = []
+        for article_data, similarity in results:
+            # article_data уже содержит все нужные данные
+            article_data['similarity_score'] = round(similarity, 3)
+            articles_data.append(article_data)
+        
+        return jsonify({
+            'articles': articles_data,
+            'query': query,
+            'found': len(articles_data)
+        })
+    except Exception as e:
+        import traceback
+        print(f"Ошибка в /api/semantic-search: {traceback.format_exc()}")
+        return jsonify({'error': str(e), 'articles': []}), 500
 
 
 @app.route('/api/clear-db', methods=['POST'])

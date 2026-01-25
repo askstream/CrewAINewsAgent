@@ -9,12 +9,14 @@ import requests
 import json
 
 
-def classify_with_direct_api(article: NewsArticle, criteria: str, llm_model: str = None, llm_temperature: float = None) -> dict:
+def classify_with_direct_api(article: NewsArticle, criteria: str, llm_model: str = None, llm_temperature: float = None, relevance_threshold: float = None) -> dict:
     """Классификация через прямой HTTP запрос к API"""
     if llm_model is None:
         llm_model = Config.LLM_MODEL
     if llm_temperature is None:
         llm_temperature = Config.LLM_TEMPERATURE
+    if relevance_threshold is None:
+        relevance_threshold = Config.RELEVANCE_THRESHOLD
     
     # Формируем URL для запроса
     api_url = Config.OPENAI_API_BASE.rstrip('/')
@@ -40,7 +42,7 @@ def classify_with_direct_api(article: NewsArticle, criteria: str, llm_model: str
 
 Где:
 - relevance_score: оценка релевантности (0.0 - не релевантно, 1.0 - полностью релевантно)
-- is_relevant: true если relevance_score >= 0.6, иначе false
+- is_relevant: true если relevance_score >= {relevance_threshold}, иначе false
 - reason: краткое объяснение почему статья релевантна или нет
 """
     
@@ -91,20 +93,22 @@ def classify_with_direct_api(article: NewsArticle, criteria: str, llm_model: str
 
 def classify_article_relevance(article: NewsArticle, criteria: str) -> dict:
     """Классификация статьи по релевантности с использованием LLM (использует настройки из Config)"""
-    return classify_article_relevance_with_settings(article, criteria, Config.LLM_MODEL, Config.LLM_TEMPERATURE)
+    return classify_article_relevance_with_settings(article, criteria, Config.LLM_MODEL, Config.LLM_TEMPERATURE, Config.RELEVANCE_THRESHOLD)
 
 
-def classify_article_relevance_with_settings(article: NewsArticle, criteria: str, llm_model: str = None, llm_temperature: float = None) -> dict:
+def classify_article_relevance_with_settings(article: NewsArticle, criteria: str, llm_model: str = None, llm_temperature: float = None, relevance_threshold: float = None) -> dict:
     """Классификация статьи по релевантности с указанными настройками"""
     if llm_model is None:
         llm_model = Config.LLM_MODEL
     if llm_temperature is None:
         llm_temperature = Config.LLM_TEMPERATURE
+    if relevance_threshold is None:
+        relevance_threshold = Config.RELEVANCE_THRESHOLD
     
     # Сначала пробуем прямой HTTP запрос, если указан кастомный API
     if Config.OPENAI_API_BASE:
         try:
-            return classify_with_direct_api(article, criteria, llm_model, llm_temperature)
+            return classify_with_direct_api(article, criteria, llm_model, llm_temperature, relevance_threshold)
         except Exception as e:
             print(f"Прямой API запрос не удался: {e}, пробуем через langchain")
     
@@ -114,7 +118,7 @@ def classify_article_relevance_with_settings(article: NewsArticle, criteria: str
     except Exception as e:
         print(f"Ошибка при создании LLM: {e}")
         # Fallback на простую классификацию
-        return simple_classification(article, criteria)
+        return simple_classification(article, criteria, relevance_threshold)
     
     prompt = f"""Проанализируй следующую новость и определи её релевантность к критерию отбора.
 
@@ -132,7 +136,7 @@ def classify_article_relevance_with_settings(article: NewsArticle, criteria: str
 
 Где:
 - relevance_score: оценка релевантности (0.0 - не релевантно, 1.0 - полностью релевантно)
-- is_relevant: true если relevance_score >= 0.6, иначе false
+- is_relevant: true если relevance_score >= {relevance_threshold}, иначе false
 - reason: краткое объяснение почему статья релевантна или нет
 """
     
@@ -194,7 +198,10 @@ def classify_article_relevance_with_settings(article: NewsArticle, criteria: str
         return simple_classification(article, criteria)
 
 
-def simple_classification(article: NewsArticle, criteria: str) -> dict:
+def simple_classification(article: NewsArticle, criteria: str, relevance_threshold: float = None) -> dict:
+    """Простая классификация по ключевым словам (fallback)"""
+    if relevance_threshold is None:
+        relevance_threshold = Config.RELEVANCE_THRESHOLD
     """Простая классификация на основе ключевых слов (fallback)"""
     text = f"{article.title} {article.content or ''}".lower()
     criteria_lower = criteria.lower()
@@ -229,22 +236,24 @@ def simple_classification(article: NewsArticle, criteria: str) -> dict:
     
     return {
         'relevance_score': score,
-        'is_relevant': score >= 0.5,  # Снизил порог для fallback
+        'is_relevant': score >= relevance_threshold,
         'reason': f'Простая классификация: {matches} точных совпадений, {partial_matches} частичных из {total_words} ключевых слов'
     }
 
 
 def classify_articles(articles: List[NewsArticle], criteria: str):
     """Классификация списка статей (использует настройки из Config)"""
-    classify_articles_with_settings(articles, criteria, Config.LLM_MODEL, Config.LLM_TEMPERATURE)
+    classify_articles_with_settings(articles, criteria, Config.LLM_MODEL, Config.LLM_TEMPERATURE, Config.RELEVANCE_THRESHOLD)
 
 
-def classify_articles_with_settings(articles: List[NewsArticle], criteria: str, llm_model: str = None, llm_temperature: float = None):
+def classify_articles_with_settings(articles: List[NewsArticle], criteria: str, llm_model: str = None, llm_temperature: float = None, relevance_threshold: float = None):
     """Классификация списка статей с указанными настройками"""
     if llm_model is None:
         llm_model = Config.LLM_MODEL
     if llm_temperature is None:
         llm_temperature = Config.LLM_TEMPERATURE
+    if relevance_threshold is None:
+        relevance_threshold = Config.RELEVANCE_THRESHOLD
     
     session = get_db_session()
     
@@ -253,7 +262,7 @@ def classify_articles_with_settings(articles: List[NewsArticle], criteria: str, 
             if article.is_duplicate:
                 continue  # Пропускаем дубликаты
             
-            result = classify_article_relevance_with_settings(article, criteria, llm_model, llm_temperature)
+            result = classify_article_relevance_with_settings(article, criteria, llm_model, llm_temperature, relevance_threshold)
             
             article.relevance_score = result['relevance_score']
             article.is_relevant = result['is_relevant']

@@ -1,6 +1,6 @@
 """Модели базы данных для новостей и RSS каналов"""
 from datetime import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Boolean, ForeignKey, JSON, UniqueConstraint
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Float, Boolean, ForeignKey, JSON, UniqueConstraint, LargeBinary
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from config import Config
@@ -73,6 +73,12 @@ class NewsArticle(Base):
     
     # Хеш для быстрой проверки дубликатов
     content_hash = Column(String(64), index=True)
+    
+    # Саммари статьи
+    summary = Column(Text, nullable=True)  # Краткое содержание статьи
+    
+    # Векторное представление для семантического поиска (JSON массив чисел)
+    embedding = Column(JSON, nullable=True)  # Embedding вектор статьи
 
 
 # Создание движка БД и сессии
@@ -99,7 +105,53 @@ def init_db():
             if db_dir and not os.path.exists(db_dir):
                 os.makedirs(db_dir, exist_ok=True)
     
+    # Создаем все таблицы
     Base.metadata.create_all(engine)
+    
+    # Для SQLite: добавляем недостающие колонки, если таблица уже существует
+    if Config.DATABASE_URL.startswith('sqlite:///'):
+        from sqlalchemy import text
+        try:
+            with engine.begin() as conn:
+                # Проверяем, существует ли таблица news_articles
+                result = conn.execute(text("""
+                    SELECT name FROM sqlite_master 
+                    WHERE type='table' AND name='news_articles'
+                """))
+                if result.fetchone():
+                    # Таблица существует, проверяем колонки
+                    # Проверяем summary
+                    result = conn.execute(text("""
+                        SELECT COUNT(*) as cnt 
+                        FROM pragma_table_info('news_articles') 
+                        WHERE name = 'summary'
+                    """))
+                    has_summary = result.fetchone()[0] > 0
+                    
+                    # Проверяем embedding
+                    result = conn.execute(text("""
+                        SELECT COUNT(*) as cnt 
+                        FROM pragma_table_info('news_articles') 
+                        WHERE name = 'embedding'
+                    """))
+                    has_embedding = result.fetchone()[0] > 0
+                    
+                    # Добавляем недостающие колонки
+                    if not has_summary:
+                        try:
+                            conn.execute(text("ALTER TABLE news_articles ADD COLUMN summary TEXT"))
+                            print("Добавлена колонка summary в таблицу news_articles")
+                        except Exception as e:
+                            print(f"Ошибка при добавлении колонки summary: {e}")
+                    
+                    if not has_embedding:
+                        try:
+                            conn.execute(text("ALTER TABLE news_articles ADD COLUMN embedding JSON"))
+                            print("Добавлена колонка embedding в таблицу news_articles")
+                        except Exception as e:
+                            print(f"Ошибка при добавлении колонки embedding: {e}")
+        except Exception as e:
+            print(f"Ошибка при проверке/обновлении схемы БД: {e}")
 
 
 def get_db_session():
