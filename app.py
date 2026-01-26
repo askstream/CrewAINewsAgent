@@ -5,7 +5,6 @@ import uuid
 import time
 from datetime import datetime
 from sqlalchemy import func
-from crew import NewsProcessingCrew
 from config import Config
 from models import NewsArticle, SearchHistory, SystemSettings, get_db_session, init_db, engine, get_all_settings, get_setting, update_setting
 
@@ -109,7 +108,6 @@ def process_news_with_progress(task_id, feed_urls, criteria, llm_model=None, llm
         
         # Инициализация БД
         init_db()
-        crew = NewsProcessingCrew()
         
         # Создание записи истории запроса
         session = get_db_session()

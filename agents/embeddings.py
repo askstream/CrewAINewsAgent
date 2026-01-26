@@ -6,9 +6,12 @@ import json
 import numpy as np
 from typing import List, Optional
 
+# Используем модель из конфигурации
+EMBEDDING_MODEL = Config.EMBEDDING_MODEL
+
 
 def generate_embedding_with_openai(text: str, model: str = "text-embedding-3-small") -> Optional[List[float]]:
-    """Генерация embedding через OpenAI API"""
+    """Генерация embedding через OpenAI API или Ollama API"""
     if not text or not text.strip():
         print("Текст для embedding пустой")
         return None
@@ -17,8 +20,15 @@ def generate_embedding_with_openai(text: str, model: str = "text-embedding-3-sma
         print("OPENAI_API_KEY не установлен, невозможно сгенерировать embedding")
         return None
     
-    # Ограничиваем длину текста (максимум 8000 токенов для text-embedding-3-small)
-    max_length = 8000
+    # Определяем, используется ли Ollama
+    is_ollama = Config.OPENAI_API_BASE and 'localhost:11434' in Config.OPENAI_API_BASE
+    
+    # Ограничиваем длину текста
+    # Для Ollama модели обычно имеют меньший контекст
+    if is_ollama:
+        max_length = 8000  # Для большинства Ollama embedding моделей
+    else:
+        max_length = 8000  # Для OpenAI text-embedding-3-small
     text = text[:max_length] if len(text) > max_length else text
     
     # Формируем URL для запроса
@@ -44,7 +54,7 @@ def generate_embedding_with_openai(text: str, model: str = "text-embedding-3-sma
     }
     
     try:
-        response = requests.post(api_url, headers=headers, json=payload, timeout=30)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60 if is_ollama else 30)
         response.raise_for_status()
         data = response.json()
         
@@ -53,10 +63,16 @@ def generate_embedding_with_openai(text: str, model: str = "text-embedding-3-sma
             return embedding
         else:
             print(f"Неожиданный формат ответа API для embeddings: {data}")
+            # Пробуем нативный Ollama API, если OpenAI-совместимый не работает
+            if is_ollama:
+                return _try_ollama_native_api(text, model)
             return None
     except requests.exceptions.HTTPError as e:
-        # Если API не поддерживает embeddings (404), просто пропускаем
-        if e.response.status_code == 404:
+        # Если API не поддерживает embeddings (404), пробуем нативный Ollama API
+        if e.response.status_code == 404 and is_ollama:
+            print(f"OpenAI-совместимый endpoint не найден, пробуем нативный Ollama API...")
+            return _try_ollama_native_api(text, model)
+        elif e.response.status_code == 404:
             print(f"API endpoint для embeddings не найден (404). Embeddings будут пропущены.")
             return None
         print(f"HTTP ошибка при запросе к API для embeddings: {e}")
@@ -69,7 +85,29 @@ def generate_embedding_with_openai(text: str, model: str = "text-embedding-3-sma
         return None
 
 
-def generate_embedding_for_article(article: NewsArticle, model: str = "text-embedding-3-small") -> Optional[List[float]]:
+def _try_ollama_native_api(text: str, model: str) -> Optional[List[float]]:
+    """Попытка использовать нативный Ollama API для embeddings"""
+    try:
+        ollama_url = "http://localhost:11434/api/embed"
+        payload = {
+            'model': model,
+            'prompt': text
+        }
+        response = requests.post(ollama_url, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        
+        if 'embedding' in data:
+            return data['embedding']
+        else:
+            print(f"Неожиданный формат ответа Ollama API: {data}")
+            return None
+    except Exception as e:
+        print(f"Ошибка при использовании нативного Ollama API: {e}")
+        return None
+
+
+def generate_embedding_for_article(article: NewsArticle, model: str = None) -> Optional[List[float]]:
     """Генерация embedding для статьи"""
     # Получаем значения атрибутов напрямую, чтобы избежать проблем с сессией
     try:
@@ -97,6 +135,8 @@ def generate_embedding_for_article(article: NewsArticle, model: str = "text-embe
         return None
     
     combined_text = " ".join(text_parts)
+    if model is None:
+        model = EMBEDDING_MODEL
     return generate_embedding_with_openai(combined_text, model)
 
 
@@ -182,7 +222,7 @@ def find_similar_articles(query_embedding: List[float], articles: List[NewsArtic
     return similarities[:limit]
 
 
-def generate_embeddings_for_articles_by_ids(article_ids: List[int], search_history_id: int = None, model: str = "text-embedding-3-small"):
+def generate_embeddings_for_articles_by_ids(article_ids: List[int], search_history_id: int = None, model: str = None):
     """Генерация embeddings для списка статей по их ID"""
     from models import get_db_session
     
@@ -225,6 +265,8 @@ def generate_embeddings_for_articles_by_ids(article_ids: List[int], search_histo
                 
                 if text_parts:
                     combined_text = " ".join(text_parts)
+                    if model is None:
+                        model = EMBEDDING_MODEL
                     embedding = generate_embedding_with_openai(combined_text, model)
                     if embedding:
                         db_article.embedding = embedding
@@ -252,7 +294,7 @@ def generate_embeddings_for_articles_by_ids(article_ids: List[int], search_histo
         session.close()
 
 
-def generate_embeddings_for_articles(articles: List[NewsArticle], model: str = "text-embedding-3-small"):
+def generate_embeddings_for_articles(articles: List[NewsArticle], model: str = None):
     """Генерация embeddings для списка статей (устаревший метод, используйте generate_embeddings_for_articles_by_ids)"""
     # Получаем ID статей до того, как они станут detached
     article_ids = []
@@ -344,7 +386,7 @@ def semantic_search(query_text: str, search_history_id: int = None,
         
         if articles_with_embeddings:
             # Генерируем embedding для запроса
-            query_embedding = generate_embedding_with_openai(query_text)
+            query_embedding = generate_embedding_with_openai(query_text, Config.EMBEDDING_MODEL)
             
             if query_embedding:
                 # Адаптивный порог в зависимости от длины запроса (из настроек БД)

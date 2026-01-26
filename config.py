@@ -17,6 +17,9 @@ class Config:
     LLM_MODEL = os.getenv('LLM_MODEL', 'gpt-4o-mini')
     LLM_TEMPERATURE = float(os.getenv('LLM_TEMPERATURE', '0.7'))
     
+    # Embedding настройки
+    EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'text-embedding-3-small')
+    
     # RSS каналы (разделенные запятыми)
     RSS_FEEDS = os.getenv('RSS_FEEDS', '').split(',') if os.getenv('RSS_FEEDS') else []
     
